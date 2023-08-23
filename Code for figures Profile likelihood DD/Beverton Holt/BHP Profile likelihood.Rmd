@@ -1,0 +1,175 @@
+---
+title: "Profile likelihood for Beverton Holt process"
+author: "Subhash Lele"
+date: '2022-09-16'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE, warning = FALSE, message = FALSE)
+```
+
+We will compute the profile likelihood for various parameters of interest for the Beverton-Holt-Poisson model for population dynamics. We only need to provide different psi functions to get these.
+
+## Global R functions and libraries:
+We will source the appropriate general set of functions and libraries in the following. These are common to all models.
+
+```{r, message=FALSE}
+library(here)
+source(here("Source functions/Required libraries.R"))
+source(here("Source functions/Source function for DC Profile likelihood_2.R"))
+source(here("Source functions/Source function for analytical profile likelihood.R"))
+```
+
+We will then source the model specific R functions to compute the MLE of the parameters and generate the MCMC samples based on the original and doubled data. There is no easy way to compute analytical profile likelihood and hence we do not include those functions.
+```{r}
+source(here("Beverton Holt/Functions for MLE and Profile Sampling.R"))
+```
+Now we write functions that compute the parameter of interest that is simply a function of the canonical parameters. 
+
+```{r}
+BHP.lambda = function(M){
+  tmp <- M[,3]
+        psi <- tmp + 1
+        return(psi)
+}
+
+# Carrying capacity
+BHP.K = function(M){
+  tmp <- M[,3]
+  beta <- M[,1]
+        psi <- tmp/beta
+        return(psi)
+}
+```
+Algorithm 2: Data doubling with asymptotic distribution of the MLE as the prior distribution
+
+```{r}
+# Step 1: Compute the MLE and FI
+
+Y=dcdim(data.matrix(c(17,29,39,63,185,258,267,392,510,570,650,560,575,650,550,480,520,500)))
+dat = list(ncl=1, n=18, Y=Y)
+
+n.clones = c(1,5,10)
+params = c("ln.tmp","ln.beta","ln.sigma")
+
+DC.MLE = dc.fit(dat,params,model=DC.MLE.fn,n.clones=n.clones,multiply="ncl", unchanged="n",n.chains=5,n.update=1000,n.iter=5000,n.adapt=2000)
+
+# Check the convergence and MLE estimates etc.
+# summary(DC.MLE)
+# dctable(DC.MLE)
+# dcdiag(DC.MLE)
+
+# Step 2: Generate samples using MLE distribution as the prior
+
+dat.p = list(Y=Y,n=18,ncl=1,MLE=coef(DC.MLE),FI=solve(vcov(DC.MLE)))
+unchanged=c("n","MLE","FI")
+params = c("beta","sigma","tmp")
+
+ProfileSample_A2 = DDSample_fn(DC.profile.fn,dat.p,params,unchanged,n.chains=20,n.update=1000,n.iter=2000,n.adapt=5000)
+
+```
+Now estimate the profile likelihood function, Profile MLE and associated confidence interval. We also get the grid points for applying Algorithm 1.
+```{r}
+DD.profile.q = profile_fn(psi.fn=BHP.lambda,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+```
+
+Algorithm 1: Parameters of interest are marginal parameters. We use data doubling with a flat prior.
+
+```{r}
+dat = list(Y=Y,n=nrow(Y),ncl=1)
+params = c("lambda")
+unchanged=c("n")
+
+ProfileSample_A1 = DDSample_fn(Bayes.fn.lambda,dat,params,unchanged,n.chains=20,n.update=1000,n.iter=2000,n.adapt=5000)
+
+BH.lambda = function(M){
+  out = M  # We only monitor the parameter of interest
+  return(out)
+}
+
+psi.grid = psi.grid
+DD.profile.psi = profile_fn(psi.fn=BH.lambda,ProfileSample_A1$M1,ProfileSample_A1$M2, method="c",psi.grid=psi.grid)
+```
+Get the data for the profile likelihood
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+DD.PL.psi = DD.profile.psi$Profile.out[,2])
+write.table(loglike.data,here(here("Beverton Holt/Figure 4a data.csv")))
+```
+Plot the profile likelihood
+```{r}
+#loglike.data = read.table(here("Beverton Holt/Figure 4a data.csv"))
+fig4a = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.psi),col="black",linetype="twodash") +
+labs(x="lambda", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle("Beverton Holt ")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot(fig4a)
+```
+
+Let us apply Algorithm 1 and 2 to compute Profile likelihood for Carrying capacity.
+
+```{r}
+# For Algorithm 2, we already have the MCMC samples. We need to 
+# use a different function for the parameter of interest.
+
+DD.profile.q = profile_fn(psi.fn=BHP.K,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+
+# Generate samples for Algorithm 1 for carrying capacity.
+dat = list(Y=Y,n=nrow(Y),ncl=1)
+params = c("Carry")
+unchanged=c("n")
+
+ProfileSample_A1 = DDSample_fn(Bayes.fn.K,dat,params,unchanged,n.chains=20,n.update=1000,n.iter=2000,n.adapt=5000)
+
+BH.K = function(M){
+  out = M  # We only monitor the parameter of interest
+  return(out)
+}
+
+psi.grid = psi.grid
+DD.profile.psi = profile_fn(psi.fn=BH.K,ProfileSample_A1$M1,ProfileSample_A1$M2, method="c",psi.grid=psi.grid)
+```
+Get the data for the profile likelihood
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+DD.PL.psi = DD.profile.psi$Profile.out[,2])
+write.table(loglike.data,here(here("Beverton Holt/Figure 4b data.csv")))
+```
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Beverton Holt/Figure 4b data.csv"))
+fig4b = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.psi),col="black",linetype="twodash") +
+labs(x="Carrying capacity", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle("Beverton Holt ")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot(fig4b)
+```
+
+Let us plot these two as a side by side figure.
+
+```{r}
+library(cowplot)
+Figure4 = plot_grid(fig4a,fig4b)
+ggsave2(here("Beverton Holt/Figure 4.pdf"),Figure4,device="pdf")
+```
+
+
+

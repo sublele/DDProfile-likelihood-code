@@ -1,0 +1,183 @@
+---
+title: "Profile likelihood for common odds ratio"
+author: "Subhash Lele"
+date: '2022-12-20'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We will compute the profile likelihood for common odds ratio for a set of 2 x 2 tables. We will use the Blocker data from Bugs software. 
+
+## Global R functions and libraries:
+
+We will source the appropriate general set of functions and libraries in the following. These are common to all models. 
+
+```{r, message=FALSE}
+library(here)
+source(here("Source functions and libraries/Required libraries.R"))
+source(here("Source functions and libraries/Source function for DC Profile likelihood_2.R"))
+
+```
+Following is the data set.
+
+```{r}
+OR.data = list("rt" =
+            c(3, 7, 5, 102, 28, 4, 98, 60, 25, 138, 64, 45, 9, 57, 25, 33, 
+            28, 8, 6, 32, 27, 22),
+        "nt" =
+            c(38, 114, 69, 1533, 355, 59, 945, 632, 278, 1916, 873, 263, 
+            291, 858, 154, 207, 251, 151, 174, 209, 391, 680),
+        "rc" =
+            c(3, 14, 11, 127, 27, 6, 152, 48, 37, 188, 52, 47, 16, 45, 31, 
+            38, 12, 6, 3, 40, 43, 39),
+        "nc" =
+            c(39, 116, 93, 1520, 365, 52, 939, 471, 282, 1921, 583, 266, 
+            293, 883, 147, 213, 122, 154, 134, 218, 364, 674),
+        "Num" =
+            22)
+rt = dcdim(array(OR.data$rt,c(22,1)))
+nt = dcdim(array(OR.data$nt,c(22,1)))
+rc = dcdim(array(OR.data$rc,c(22,1)))
+nc = dcdim(array(OR.data$nt,c(22,1)))
+Num = OR.data$Num
+```
+The model functions for DD are as follows.
+```{r}
+DC.MLE.fn = function() {
+       for (k in 1:ncl){
+       for (i in 1:Num) {
+          rt[i,k] ~ dbin(pt[i,k], nt[i,k])
+          rc[i,k] ~ dbin(pc[i,k], nc[i,k])
+          logit(pc[i,k]) <- mu[i,k] 
+          logit(pt[i,k]) <- mu[i,k] + delta[i,k]
+
+          delta[i,k] ~ dnorm(d, tau1)
+          mu[i,k] ~ dnorm(alpha,tau2)}}
+       
+       parms ~ dmnorm(MuP, PrecP)
+      d <- parms[1]
+      tau1 <- exp(parms[3])
+      sigma1 <- 1/sqrt(tau1)
+      alpha <- parms[2]
+      tau2 <- exp(parms[4])
+      sigma2 <- 1/sqrt(tau2)
+}
+
+DC.profile.fn = function() {
+       for (k in 1:ncl){
+       for (i in 1:Num) {
+          rt[i,k] ~ dbin(pt[i,k], nt[i,k])
+          rc[i,k] ~ dbin(pc[i,k], nc[i,k])
+          logit(pc[i,k]) <- mu[i,k] 
+          logit(pt[i,k]) <- mu[i,k] + delta[i,k]
+
+          delta[i,k] ~ dnorm(d, tau1)
+          mu[i,k] ~ dnorm(alpha, tau2)}}
+       
+       parms ~ dmnorm(MLE, FI)
+      d <- parms[1]
+      tau1 <- exp(parms[3])
+      sigma1 <- 1/sqrt(tau1)
+      alpha <- parms[2]
+      tau2 <- exp(parms[4])
+      sigma2 <- 1/sqrt(tau2)
+}
+
+Bayes.profile.fn = function() {
+       for (k in 1:ncl){
+       for (i in 1:Num) {
+          rt[i,k] ~ dbin(pt[i,k], nt[i,k])
+          rc[i,k] ~ dbin(pc[i,k], nc[i,k])
+          logit(pc[i,k]) <- mu[i,k] 
+          logit(pt[i,k]) <- mu[i,k] + delta[i,k]
+
+          delta[i,k] ~ dnorm(d, tau1)
+          mu[i,k] ~ dnorm(alpha, tau2)}}
+       
+       d ~ dnorm(0.0, 1.0E-6)
+       tau1 ~ dgamma(1.0E-3, 1.0E-3)
+       alpha ~ dnorm(0.0, 1.0E-6)
+       tau2 ~ dgamma(1.0E-3, 1.0E-3)
+}
+
+OR.psi = function(M){
+  out = M  # We only monitor the parameter of interest
+  return(out)
+}
+
+OR.fn = function(M){
+  out = M[,1]  # OR is the first component
+  return(out)
+}
+```
+Algorithm 2: Data doubling with asymptotic distribution of the MLE as the prior distribution
+```{r}
+
+# Step 1: Compute the MLE and FI
+
+dat = list(rt=rt,rc=rc,nt=nt,nc=nc,Num=Num,ncl=1,MuP=rep(0,4),PrecP=diag(0.01,4,4))
+params = c("parms")
+n.clones = c(1,4,16)
+DC.MLE = dc.fit(dat,params,model=DC.MLE.fn,n.clones=n.clones,multiply="ncl",unchanged=c("Num","MuP","PrecP"),n.chains=5, n.update=1000,n.iter=5000,n.adapt=2000)
+
+# Check the convergence and MLE estimates etc.
+# summary(DC.MLE)
+# dctable(DC.MLE)
+# dcdiag(DC.MLE)
+
+# Step 2: Generate samples using MLE distribution as the prior
+
+dat.p = list(rt=rt,rc=rc,nt=nt,nc=nc,Num=Num,ncl=1,MLE=coef(DC.MLE),FI=solve(vcov(DC.MLE)))
+unchanged=c("Num","MLE","FI")
+params = c("parms")
+ProfileSample_A2 = DDSample_fn(DC.profile.fn,dat.p,params,unchanged,n.chains=50,n.update=1000,n.iter=1000,n.adapt=5000)
+```
+
+Now estimate the profile likelihood function, Profile MLE and associated confidence interval. We also get the grid points for applying Algorithm 1.
+```{r}
+DD.profile.q = profile_fn(psi.fn=OR.fn,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+```
+Algorithm 1: Parameters of interest are marginal parameters. We use data doubling with a flat prior.
+
+```{r}
+# Parameter of interest is common odds ratio 'd'
+params = c("d")
+dat = list(rt=rt,rc=rc,nt=nt,nc=nc,Num=Num,ncl=1)
+unchanged=c("Num")
+ProfileSample_A1 = DDSample_fn(Bayes.profile.fn,dat,params,unchanged,n.chains=5,n.update=1000,n.iter=1000,n.adapt=5000)
+
+OR.psi = function(M){
+  out = M  # We only monitor the parameter of interest
+  return(out)
+}
+
+psi.grid = psi.grid
+DD.profile.psi = profile_fn(psi.fn=OR.psi,ProfileSample_A1$M1,ProfileSample_A1$M2, method="c",psi.grid=psi.grid)
+```
+Get the data for the profile likelihood
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+DD.PL.psi = DD.profile.psi$Profile.out[,2])
+write.table(loglike.data,here(here("Common-odds-ratio/Figure 5 data.csv")))
+```
+
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Common-odds-ratio/Figure 5 data.csv"))
+fig5 = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.psi),col="black",linetype="twodash") +
+labs(x="Common log-odds ratio", y="Profile Log-likelihood") +
+  ylim(-3,1) + 
+ggtitle("Mixed effects Logistic regression ")+
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave(here("Common-odds-ratio/Figure5.pdf"),fig5, device="pdf")
+```

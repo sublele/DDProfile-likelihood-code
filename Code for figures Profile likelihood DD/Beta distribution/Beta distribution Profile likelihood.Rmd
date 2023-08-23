@@ -1,0 +1,430 @@
+---
+title: "Profile likelihood examples"
+subtitle: "Beta distribution: Mean, Variance and Skewness"
+author: "Subhash Lele"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+```
+# Introduction
+
+We will compute the profile likelihood for various parameters of interest for the univariate Beta distribution. 
+
+## Global R functions and libraries:
+
+We will source the appropriate general set of functions and libraries in the following. These are common to all models. 
+
+```{r, message=FALSE}
+library(here)
+source(here("Source functions and libraries/Required libraries.R"))
+source(here("Source functions and libraries/Source function for DC Profile likelihood_2.R"))
+source(here("Source functions and libraries/Source function for analytical profile likelihood.R"))
+```
+
+ We will then source the model specific R functions to compute the MLE of the parameters and generate the MCMC samples based on the original and doubled data.
+```{r}
+source(here("Beta distribution/Functions for MLE and Profile Sampling.R"))
+source(here("Beta distribution/Functions for Analytical MLE and profile likelihood.R"))
+```
+
+Now we write functions that compute the parameter of interest that is simply a function of the canonical parameters. 
+
+```{r}
+
+Beta.mean = function(M){
+  a = exp(M[,1])
+  b = exp(M[,2])
+  psi = a/(a+b)
+  return(psi)
+}
+
+Beta.var = function(M){
+  a = exp(M[,1])
+  b = exp(M[,2])
+  num = a*b
+  den1 = (a+b)^2
+  den2 = (a+b+1)
+  psi = num/(den1*den2)
+  return(psi)
+}
+
+Beta.skew = function(M){
+  a = exp(M[,1])
+  b = exp(M[,2])
+  num = 2*(b-a)*sqrt(a+b+1)
+  den1 = (a+b+2)
+  den2 = sqrt(a*b)
+  psi = num/(den1*den2)
+  return(psi)
+}
+```
+
+Following are functions specify the constraint based on the parameter of interest for computing analytical profile likelihood. 
+
+```{r}
+Ana.Beta.mean = function(parms,Y,psi.fix){
+  a = exp(parms[1])
+  b = exp(parms[2])
+  psi = a/(a+b)-psi.fix
+  return(psi)
+}
+
+Ana.Beta.var = function(parms,Y,psi.fix){
+  a = exp(parms[1])
+  b = exp(parms[2])
+  num = a*b
+  den1 = (a+b)^2
+  den2 = (a+b+1)
+  psi = num/(den1*den2)-psi.fix
+  return(psi)
+}
+
+Ana.Beta.skew = function(parms,Y,psi.fix){
+  a = exp(parms[1])
+  b = exp(parms[2])
+  num = 2*(b-a)*sqrt(a+b+1)
+  den1 = (a+b+2)
+  den2 = sqrt(a*b)
+  psi = num/(den1*den2)-psi.fix
+  return(psi)
+}
+
+```
+Let us now apply this on some generated data. We will start with sample size 10. 
+
+```{r}
+shape1 = 3
+shape2 = 5
+n = 10
+Y = rbeta(n,shape1,shape2)
+```
+Data cloning for MLE and data doubling samples. 
+
+```{r}
+# Compute the MLE first
+Y = dcdim(data.matrix(Y))
+dat = list(Y=Y,n=n,ncl=1,MuP=rep(0,2),PrecP=diag(0.01,2,2))
+
+n.clones = c(1,5,10)
+params = c("parms")
+
+DC.MLE = dc.fit(dat,params,model=DC.MLE.fn,n.clones=n.clones,multiply="ncl",unchanged=c("n","MuP","PrecP"),n.chains=5,n.update=1000,n.iter=5000,n.adapt=2000)
+
+# Check the convergence and MLE estimates etc.
+# summary(DC.MLE)
+# dctable(DC.MLE)
+# dcdiag(DC.MLE)
+
+# Step 2: Generate samples using MLE distribution as the prior
+
+dat.p = list(Y=Y,n=n,ncl=1,MLE=coef(DC.MLE),FI=solve(vcov(DC.MLE)))
+unchanged=c("n","MLE","FI")
+params = c("parms")
+
+ProfileSample_A2 = DDSample_fn(DC.profile.fn,dat.p,params,unchanged,n.chains=50,n.update=1000,n.iter=1000,n.adapt=5000)
+
+```
+Now estimate the profile likelihood function, Profile MLE and associated confidence interval. We also get the grid points for applying Algorithm 1.
+```{r}
+DD.profile.q = profile_fn(psi.fn=Beta.mean,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+```
+Algorithm 1: Parameters of interest is a marginal parameters. We use data doubling with a flat prior.
+
+```{r}
+Y = dcdim(data.matrix(Y))
+dat = list(Y=Y,n=n,ncl=1)
+params = c("mu1")
+unchanged=c("n")
+
+ProfileSample_A1 = DDSample_fn(Bayes.fn,dat,params,unchanged,n.chains=5,n.update=1000,n.iter=1000,n.adapt=5000)
+
+Beta.psi = function(M){
+  out = M  # We only monitor the parameter of interest
+  return(out)
+}
+
+DD.profile.psi = profile_fn(psi.fn=Beta.psi,ProfileSample_A1$M1,ProfileSample_A1$M2, method="c",psi.grid=psi.grid)
+```
+
+We can also compute analytical profile likelihood in this case.
+
+```{r}
+parms.start = c(log(shape1),log(shape2))
+Ana.profile.mean = profile.analytical(parms.start,floglike.Beta,fpsi=Ana.Beta.mean,Y,psi.grid)
+# Need to standardize this function
+Ana.profile.mean$profile.like = -Ana.profile.mean$profile.like + as.numeric(min(Ana.profile.mean$profile.like))
+
+```
+Get the data for the profile likelihood
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+DD.PL.psi = DD.profile.psi$Profile.out[,2],
+Analytical.PL = Ana.profile.mean[,2])
+write.table(loglike.data,here(here("Beta distribution/Figure 1a data.csv")))
+```
+
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Beta distribution/Figure 1a data.csv"))
+fig1a = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.psi),col="black",linetype="twodash") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=Analytical.PL),col="black",linetype="solid") +
+labs(x="Mean", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle("N=10")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+We will now use Algorithm 2 and analytical profile likelihood for variance and skewness parameters. Notice that Algorithm 1 is not applicable (at least not easily) in these cases. 
+
+
+```{r}
+
+#Profile likelihood for variance
+
+DD.profile.q = profile_fn(psi.fn=Beta.var,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+
+# Analytical profile likelihood for variance
+
+parms.start = c(log(shape1),log(shape2))
+Ana.profile.var = profile.analytical(parms.start,floglike.Beta,fpsi=Ana.Beta.var,Y,psi.grid)
+# Need to standardize this function
+Ana.profile.var$profile.like = -Ana.profile.var$profile.like + as.numeric(min(Ana.profile.var$profile.like))
+```
+Get the data for the profile likelihood 
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+Analytical.PL = Ana.profile.var[,2])
+write.table(loglike.data,here(here("Beta distribution/Figure 1c data.csv")))
+```
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Beta distribution/Figure 1c data.csv"))
+fig1c = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=Analytical.PL),col="black",linetype="solid") +
+labs(x="Variance", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle("N=10")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Profile likelihood for skewness
+
+```{r}
+DD.profile.q = profile_fn(psi.fn=Beta.skew,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+
+# Analytial profile likelihood
+parms.start = c(log(shape1),log(shape2))
+Ana.profile.skew = profile.analytical(parms.start,floglike.Beta,fpsi=Ana.Beta.skew,Y,psi.grid)
+# Need to standardize this function
+Ana.profile.skew$profile.like = -Ana.profile.skew$profile.like + as.numeric(min(Ana.profile.skew$profile.like))
+```
+Get the data for the profile likelihood 
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+Analytical.PL = Ana.profile.skew[,2])
+write.table(loglike.data,here(here("Beta distribution/Figure 1e data.csv")))
+```
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Beta distribution/Figure 1e data.csv"))
+fig1e = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=Analytical.PL),col="black",linetype="solid") +
+labs(x="Skewness", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle("N=10")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+We will now plot the corresponding figures for N=50 
+
+```{r}
+shape1 = 3
+shape2 = 5
+n = 50
+Y = rbeta(n,shape1,shape2)
+```
+Data cloning for MLE and data doubling samples. 
+
+```{r}
+# Compute the MLE first
+Y = dcdim(data.matrix(Y))
+dat = list(Y=Y,n=n,ncl=1,MuP=rep(0,2),PrecP=diag(0.01,2,2))
+
+n.clones = c(1,5,10)
+params = c("parms")
+
+DC.MLE = dc.fit(dat,params,model=DC.MLE.fn,n.clones=n.clones,multiply="ncl",unchanged=c("n","MuP","PrecP"),n.chains=5,n.update=1000,n.iter=5000,n.adapt=2000)
+
+# Check the convergence and MLE estimates etc.
+# summary(DC.MLE)
+# dctable(DC.MLE)
+# dcdiag(DC.MLE)
+
+# Step 2: Generate samples using MLE distribution as the prior
+
+dat.p = list(Y=Y,n=n,ncl=1,MLE=coef(DC.MLE),FI=solve(vcov(DC.MLE)))
+unchanged=c("n","MLE","FI")
+params = c("parms")
+
+ProfileSample_A2 = DDSample_fn(DC.profile.fn,dat.p,params,unchanged,n.chains=50,n.update=1000,n.iter=1000,n.adapt=5000)
+
+```
+Now estimate the profile likelihood function, Profile MLE and associated confidence interval. We also get the grid points for applying Algorithm 1.
+```{r}
+DD.profile.q = profile_fn(psi.fn=Beta.mean,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+```
+Algorithm 1: Parameters of interest is a marginal parameters. We use data doubling with a flat prior.
+
+```{r}
+Y = dcdim(data.matrix(Y))
+dat = list(Y=Y,n=n,ncl=1)
+params = c("mu1")
+unchanged=c("n")
+
+ProfileSample_A1 = DDSample_fn(Bayes.fn,dat,params,unchanged,n.chains=5,n.update=1000,n.iter=1000,n.adapt=5000)
+
+Beta.psi = function(M){
+  out = M  # We only monitor the parameter of interest
+  return(out)
+}
+
+DD.profile.psi = profile_fn(psi.fn=Beta.psi,ProfileSample_A1$M1,ProfileSample_A1$M2, method="c",psi.grid=psi.grid)
+```
+
+We can also compute analytical profile likelihood in this case.
+
+```{r}
+parms.start = c(log(shape1),log(shape2))
+Ana.profile.mean = profile.analytical(parms.start,floglike.Beta,fpsi=Ana.Beta.mean,Y,psi.grid)
+# Need to standardize this function
+Ana.profile.mean$profile.like = -Ana.profile.mean$profile.like + as.numeric(min(Ana.profile.mean$profile.like))
+
+```
+Get the data for the profile likelihood
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+DD.PL.psi = DD.profile.psi$Profile.out[,2],
+Analytical.PL = Ana.profile.mean[,2])
+write.table(loglike.data,here(here("Beta distribution/Figure 1b data.csv")))
+```
+
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Beta distribution/Figure 1b data.csv"))
+fig1b = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.psi),col="black",linetype="twodash") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=Analytical.PL),col="black",linetype="solid") +
+labs(x="Mean", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle("N=50")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+We will now use Algorithm 2 and analytical profile likelihood for variance and skewness parameters. Notice that Algorithm 1 is not applicable (at least not easily) in these cases. 
+
+
+```{r}
+
+#Profile likelihood for variance
+
+DD.profile.q = profile_fn(psi.fn=Beta.var,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+
+# Analytical profile likelihood for variance
+
+parms.start = c(log(shape1),log(shape2))
+Ana.profile.var = profile.analytical(parms.start,floglike.Beta,fpsi=Ana.Beta.var,Y,psi.grid)
+# Need to standardize this function
+Ana.profile.var$profile.like = -Ana.profile.var$profile.like + as.numeric(min(Ana.profile.var$profile.like))
+```
+Get the data for the profile likelihood 
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+Analytical.PL = Ana.profile.var[,2])
+write.table(loglike.data,here(here("Beta distribution/Figure 1d data.csv")))
+```
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Beta distribution/Figure 1d data.csv"))
+fig1d = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=Analytical.PL),col="black",linetype="solid") +
+labs(x="Variance", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle("N=50")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Profile likelihood for skewness
+
+```{r}
+DD.profile.q = profile_fn(psi.fn=Beta.skew,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+
+# Analytial profile likelihood
+parms.start = c(log(shape1),log(shape2))
+Ana.profile.skew = profile.analytical(parms.start,floglike.Beta,fpsi=Ana.Beta.skew,Y,psi.grid)
+# Need to standardize this function
+Ana.profile.skew$profile.like = -Ana.profile.skew$profile.like + as.numeric(min(Ana.profile.skew$profile.like))
+```
+Get the data for the profile likelihood 
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+Analytical.PL = Ana.profile.skew[,2])
+write.table(loglike.data,here(here("Beta distribution/Figure 1f data.csv")))
+```
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Beta distribution/Figure 1f data.csv"))
+fig1f = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=Analytical.PL),col="black",linetype="solid") +
+labs(x="Skewness", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle("N=50")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Plot these in one figure
+
+```{r}
+library(cowplot)
+Figure1 = plot_grid(fig1a,fig1b,fig1c,fig1d,fig1e,fig1f,ncol=2)
+ggsave2(here("Beta distribution/Figure1.pdf"),Figure1,device="pdf")
+```

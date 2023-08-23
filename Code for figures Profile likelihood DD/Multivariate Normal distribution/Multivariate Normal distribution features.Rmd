@@ -1,0 +1,296 @@
+---
+title: "Profile likelihood for the largest eigenvalue of the variance matrix of a Multivariate Normal distribution"
+author: "Subhash Lele"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Introduction
+
+We will compute the profile likelihood for the largest eigenvalue of the variance of a multivariate normal distribution. In this case, the parameter space is quite large and the analytical profile likelihood calculation has problems due to possible non uniqueness of the location of the maximum. 
+
+## Global R functions and libraries:
+
+We will source the appropriate general set of functions and libraries in the following. These are common to all models. 
+
+```{r, message=FALSE}
+library(here)
+source(here("Source functions and libraries/Required libraries.R"))
+source(here("Source functions and libraries/Source function for DC Profile likelihood_2.R"))
+source(here("Source functions and libraries/Source function for analytical profile likelihood.R"))
+```
+
+We will then source the model specific R functions to compute the MLE of the parameters and generate the MCMC samples based on the original and doubled data.
+```{r}
+source(here("Multivariate Normal distribution/Functions for MLE and Profile Sampling.R"))
+source(here("Multivariate Normal distribution/Functions for Analytical MLE and profile likelihood.R"))
+```  
+
+```{r}
+Psi.fn.EigenSigma = function(parms,D,index1,index2){
+  # parms is the entire row of the MCMC output.
+  A = matrix(-2,D,D)
+  for (i in 1:D){
+     A[index1[i],index2[i]] <- exp(parms[D+i])
+   } 
+    for (i in (D+1):S){
+  A[index1[i],index2[i]] <- parms[D+i]
+}
+for (i in 2:D){
+  for (j in 1:(i-1)){
+    A[i,j] <- 0
+  }
+}
+   Sigma <- A %*% t(A) 
+   # Get the maximum eigenvalue of Sigma.
+   psi = max(eigen(Sigma)$value)
+   return(psi)
+}
+
+Psi.fn.EigenSigma1 = function(M1,D,index1,index2){
+  out = apply(M1,1,Psi.fn.EigenSigma,D=D,index1=index1,index2=index2)
+  return(out)
+}
+
+# Constraint function for analytical profile likelihood. Parameter order is different and hence we need a different function. 
+
+Ana.Psi.fn.EigenSigma = function(parms,Y,psi.fix){
+  P = length(parms)
+  D = ncol(Y)
+  L = matrix(0,D,D)
+  L[lower.tri(L,diag=T)]=parms[(D+1):P]
+  for (i in 1:D){
+    L[i,i] = exp(L[i,i])}
+  Sigma = L %*% t(L)
+  psi = max(eigen(Sigma)$value)-psi.fix
+  return(psi)
+}
+
+``` 
+
+
+Let us now apply this on some generated data.
+
+```{r}
+Mu1 = c(2,3)
+sigma = 1
+rho = 0.3
+D = length(Mu1)
+Var1 = (sigma^2)*matrix(c(1,rho,rho,1),D,D)
+
+D = length(Mu1)
+P = D + (D*(D+1)/2)
+index = matrix(0,P-D,2)
+# Create the index vectors needed for cholesky decomposition.
+for (i in 1:D){
+  index[i,] = c(i,i)}
+k = D+1
+for (i in 1:(D-1)){
+  for (j in (i+1):D){
+    index[k,] = c(i,j)
+    k = k+1
+  }}
+S=nrow(index)
+
+n = 50
+Y = rmvnorm(n,Mu1,Var1)
+Y1=Y   # Keep the original data as is.array
+```
+Algorithm 2: Data doubling with asymptotic distribution of the MLE as the prior distribution
+
+```{r}
+# Step 1: Compute the MLE and FI
+Y = array(Y,c(dim(Y),1))  # Data matrix into an array for DC
+Y = dcdim(Y)
+dat = list(Y=Y,D=D,P=P,n=n,ncl=1,S=S,index1=index[,1],index2=index[,2],MuP=rep(0,P),PrecP=diag(0.1,P))
+
+n.clones = c(5,10)
+params = c("parms")
+unchanged=c("n","D","S","P","MuP","PrecP","index1","index2")
+
+DC.MLE = dc.fit(dat,params,model=DC.MLE.fn,n.clones=n.clones,multiply="ncl",unchanged=unchanged,n.chains=5,n.update=1000,n.iter=5000,n.adapt=2000)
+
+# Check the convergence and MLE estimates etc.
+# summary(DC.MLE)
+# dctable(DC.MLE)
+# dcdiag(DC.MLE)
+
+# Step 2: Generate samples using MLE distribution as the prior
+
+dat.p = list(Y=Y,D=D,P=P,n=n,S=nrow(index),index1=index[,1],index2=index[,2], ncl=1,MLE=coef(DC.MLE),FI=solve(vcov(DC.MLE)))
+unchanged=c("n","D","S","P","MLE","FI","index1","index2")
+params = c("parms")
+
+ProfileSample_A2 = DDSample_fn(DC.profile.fn,dat.p,params,unchanged,n.chains=50,n.update=1000,n.iter=1000,n.adapt=5000)
+
+```
+Now estimate the profile likelihood function, Profile MLE and associated confidence interval. We also get the grid points for applying Algorithm 1 and analytical profile likelihood.
+```{r}
+DD.profile.q = profile_fn(psi.fn=Psi.fn.EigenSigma1,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c",D=D,index1=index[,1],index2=index[,2])
+psi.grid = DD.profile.q$Profile.out$psi.grid
+```
+We can also compute analytical profile likelihood in this case.
+
+```{r}
+parms.start = c(Mu1,c(1,0.3,1))
+Analytical.MLE = optim(parms.start,floglike.MN,Y=Y1,psi.fix=0)
+
+psi.grid1 = psi.grid
+# Progress bar set up
+pb <- txtProgressBar(min = 0, max = length(psi.grid1), style = 3, width = 50, char = "*")
+Ana.profile.EigenSigma = matrix(0,length(psi.grid1),2)
+for (i in 1:length(psi.grid1)){
+  tryCatch({tmp = profile.analytical(parms.start,floglike.MN,fpsi=Ana.Psi.fn.EigenSigma,Y=Y1,psi.grid1[i])}, error = function(e) e)
+  setTxtProgressBar(pb, i)
+  Ana.profile.EigenSigma[i,1] = tmp$psi
+  Ana.profile.EigenSigma[i,2] = tmp$profile.like
+}
+closeAllConnections()
+
+# Need to standardize this function
+Ana.profile.EigenSigma[,2] = -Ana.profile.EigenSigma[,2] + as.numeric(min(Ana.profile.EigenSigma[,2]))
+```
+Get the data for the profile likelihood
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+Analytical.PL = Ana.profile.EigenSigma[,2])
+write.table(loglike.data,here(here("Multivariate Normal distribution/Figure 3a data.csv")))
+```
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Multivariate Normal distribution/Figure 3a data.csv"))
+fig3a = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=Analytical.PL),col="black",linetype="solid") +
+labs(x="Max Eigenvalue", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle(" Multivariate Normal D=2, N=50")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Read the Multivariate Test data set used by Efron (1993) and described in Multivariate Analysis by Mardia et al. (1979). 
+
+```{r}
+Testdata <- read.table(here("Multivariate Normal Distribution/Testdata.csv"))
+```
+
+Get all the relevant information to run the data doubling approach.
+
+```{r}
+Y2 = as.matrix(Testdata)
+
+# Data on three tests only. This is for the simplicity of computation. Also we will scale the data to make MCMC convergence easier to get. We will NOT use the fact that the data are scaled and treat it as a full parameter model (D + D(D+1)/2).
+D = 3
+Y3 = Y2[,1:D]  
+Y1 = scale(Y3,scale=T) 
+N = nrow(Y1)
+D=ncol(Y1)
+P = D + (D*(D+1)/2)
+index = matrix(0,P-D,2)
+# Create the index vectors
+for (i in 1:D){
+  index[i,] = c(i,i)}
+k = D+1
+for (i in 1:(D-1)){
+  for (j in (i+1):D){
+    index[k,] = c(i,j)
+    k = k+1
+  }}
+S=nrow(index)
+n = nrow(Y1)
+```
+Algorithm 2: Data doubling with asymptotic distribution of the MLE as the prior distribution
+
+```{r}
+Y1=array(Y1,c(N,D,1))
+Y1 = dcdim(Y1)
+dat = list(Y=Y1,D=D,P=P,n=n,ncl=1,S=S,index1=index[,1],index2=index[,2],MuP=rep(0,P),PrecP=diag(0.1,P))
+
+n.clones = c(1,2,4,8)
+params = c("parms")
+unchanged=c("n","D","S","P","MuP","PrecP","index1","index2")
+
+DC.MLE = dc.fit(dat,params,model=DC.MLE.fn,n.clones=n.clones,multiply="ncl",unchanged=unchanged,n.chains=5,n.update=1000,n.iter=5000,n.adapt=2000)
+
+# Check the convergence and MLE estimates etc.
+# summary(DC.MLE)
+# dctable(DC.MLE)
+# dcdiag(DC.MLE)
+
+# Step 2: Generate samples using MLE distribution as the prior
+
+dat.p = list(Y=Y1,D=D,P=P,n=n,S=S,index1=index[,1],index2=index[,2], ncl=1,MLE=coef(DC.MLE),FI=solve(vcov(DC.MLE)))
+unchanged=c("n","D","S","P","MLE","FI","index1","index2")
+params = c("parms")
+
+ProfileSample_A2 = DDSample_fn(DC.profile.fn,dat.p,params,unchanged,n.chains=5,n.update=1000,n.iter=1000,n.adapt=5000)
+```
+Now estimate the profile likelihood function, Profile MLE and associated confidence interval. We also get the grid points for applying Algorithm 1 and analytical profile likelihood.
+```{r}
+DD.profile.q = profile_fn(psi.fn=Psi.fn.EigenSigma1,ProfileSample_A2$M1,ProfileSample_A2$M2,method="c",D=D,index1=index[,1],index2=index[,2])
+psi.grid = DD.profile.q$Profile.out$psi.grid
+```
+
+Let us compute the analytical profile likelihood for the test score data.
+```{r}
+Y2 = as.matrix(Testdata)
+Y3 = Y2[,1:D]  
+Y1 = scale(Y3,scale=T)
+Mu1 = apply(Y1,2,mean)
+parms.start = coef(DC.MLE) 
+Analytical.MLE = optim(parms.start,floglike.MN,Y=as.matrix(Y1),psi.fix=0)
+parms.start = Analytical.MLE$par
+psi.grid1 = psi.grid
+# Progress bar set up
+pb <- txtProgressBar(min = 0, max = length(psi.grid1), style = 3, width = 50, char = "*")
+Ana.profile.EigenSigma = matrix(0,length(psi.grid1),2)
+for (i in 1:length(psi.grid1)){
+  tryCatch({tmp = profile.analytical(parms.start,floglike.MN,fpsi=Ana.Psi.fn.EigenSigma,Y=Y1,psi.grid1[i])}, error = function(e) e)
+  setTxtProgressBar(pb, i)
+  Ana.profile.EigenSigma[i,1] = tmp$psi
+  Ana.profile.EigenSigma[i,2] = tmp$profile.like
+}
+closeAllConnections()
+
+# Need to standardize this function
+Ana.profile.EigenSigma[,2] = -Ana.profile.EigenSigma[,2] + as.numeric(min(Ana.profile.EigenSigma[,2]))
+```
+
+Get the data for the profile likelihood
+
+```{r}
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+Analytical.PL = Ana.profile.EigenSigma[,2])
+write.table(loglike.data,here(here("Multivariate Normal distribution/Figure 3b data.csv")))
+```
+Plot the profile likelihood
+```{r}
+loglike.data = read.table(here("Multivariate Normal distribution/Figure 3b data.csv"))
+fig3b = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=Analytical.PL),col="black",linetype="solid") +
+labs(x="Max Eigenvalue", y="Profile LL") +
+  ylim(-3,1) + 
+ggtitle(" Test score data D=3, N=88")+
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Plot these two figures on one plot.
+```{r}
+library(cowplot)
+fig3 = plot_grid(fig3a,fig3b,nrow=1,labels = c('a', 'b'))
+ggsave2(here("Multivariate Normal distribution/Figure3.pdf"),fig3,device="pdf")
+```
+

@@ -1,0 +1,277 @@
+---
+title: "Figure R0 for SIR"
+author: "Subhash Lele"
+date: '2022-12-16'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This constains program for constructing figure for the profile likelihood of R0 under the SIR model for the influenza cases data. 
+
+
+```{r, message=FALSE}
+ 
+library(here)
+source(here("Source functions and libraries/Required libraries.R"))
+source(here("Source functions and libraries/Source function for DC Profile likelihood_2.R"))
+source(here("SIR model/SIR simulator.R"))
+source(here("SIR model/Source functions for ML fitting of SIR.R"))
+rstan_options (auto_write = TRUE)
+options (mc.cores = parallel::detectCores ())
+
+```
+Data set
+```{r}
+cases <- c(1,6,26,73,222,293,258,236,191,124,69,26,11,4)
+cases = cases[-1]   # Initiating at 1 in the data
+cases1 <- array(cases,c(length(cases),1))
+```
+
+Step 2: Create the appropriate  R objects from the data set.
+```{r}
+N = 763
+n_days <- length(cases)
+t <- seq(0, n_days, by = 1)
+t0 = 0
+t <- t[-1]
+#initial conditions
+i0 <- 1
+s0 <- N - i0
+r0 <- 0
+y0 = c(S = s0, I = i0, R = r0)
+```
+Step 3: Compute the MLE and its variance using data cloning
+For this particular example, we do not present the full MLE calculation using data cloning. We simply use 10 clones instead of iterating through increasing number of clones and checking on the convergence of posterior variance to 0. We did that separately.
+
+```{r}
+nclones <- 10
+cases1 <- dclone(dcdim(cases1),nclones)
+
+# Fitting Poisson errors model 
+
+MuP = rep(0,2)
+SigmaP = diag(10,2,2)
+niter = 2000
+data_sir_MN <- list(n_days = n_days, y0 = y0, t0 = t0, ts = t, N = N, nclones=nclones,cases = cases1,Mu=MuP,Sigma=SigmaP)
+unchanged=c("Mu","Sigma","n_days","y0","t0","ts","N")
+
+# Compile and fit the model
+model <- stan_model(here("SIR model/sir_poisson_MN.stan"))
+fit_sir_poisson_MN <- sampling(model,
+data = data_sir_MN,
+iter = niter,
+chains = 1)
+SIR.out = extract(fit_sir_poisson_MN)  
+
+# The MLE of the parameters
+DC.MLE = apply(SIR.out$parms,2,mean)
+DC.Var = nclones * var(SIR.out$parms)
+```
+Algorithm 2: We compute the posterior distribution with the ML asymptotic distribution as the prior distribution
+
+```{r}
+# Replace the MuP and SigmaP in the data object and rerun the program with nclones=1 and nclones=2. This will be the output needed for the profile likelihood computations. We can then compute the profile likelihood for R0 easily. 
+cases1 = array(cases1,c(n_days,1))
+cases <- dclone(dcdim(cases1),1)
+data_sir_MN_1 <- list(n_days = n_days, y0 = y0, t0 = t0, ts = t, N = N, nclones=1,cases = cases,Mu=as.vector(DC.MLE),Sigma=as.matrix(DC.Var))
+
+fit_sir_Poisson_MN_1 <- sampling(model,
+data = data_sir_MN_1,iter = niter,chains = 1)
+
+# Two clones
+cases <- dclone(dcdim(cases1),2)
+data_sir_MN_2 <- list(n_days = n_days, y0 = y0, t0 = t0, ts = t, N = N, nclones=2,cases = cases,Mu=DC.MLE,Sigma=DC.Var)
+
+fit_sir_Poisson_MN_2 <- sampling(model,
+data = data_sir_MN_2,
+iter = niter,
+chains = 1)
+
+# MCMC output for computing profile likelihood.
+
+M1 = extract(fit_sir_Poisson_MN_1)$parms
+M2 = extract(fit_sir_Poisson_MN_2)$parms
+grid.length=100
+
+# Parameter of interest calculation function
+psi.fn_R0 = function(M){
+  psi = exp(M[,1])/exp(M[,2])
+  return(psi)
+}
+```
+Compute the profile likelihood for R0 using Algorithm 2
+```{r}
+DD.profile.q = profile_fn(psi.fn=psi.fn_R0,M1,M2,method="c")
+psi.grid = DD.profile.q$Profile.out$psi.grid
+```
+Now we compute the profile likelihood using the data doubling but with flat priors. Notice that the model can be rewritten so that R0 is a marginal parameter. 
+```{r}
+
+# One clone
+nclones <- 1
+cases <- dclone(dcdim(cases1),nclones)
+data_sir_Bayes_P <- list(n_days = n_days, y0 = y0, t0 = t0, ts = t, N = N, nclones=nclones,cases = cases)
+
+# Compile the model with flat priors 
+model <- stan_model(here("SIR model/sir_poisson_Bayes.stan"))
+fit_sir_poisson_Bayes <- sampling(model,
+data = data_sir_Bayes_P,iter = niter,chains = 1)
+SIR.out1 = extract(fit_sir_poisson_Bayes) 
+
+
+nclones <- 2
+cases <- dclone(dcdim(cases1),nclones)
+data_sir_Bayes_P <- list(n_days = n_days, y0 = y0, t0 = t0, ts = t, N = N, nclones=nclones,cases = cases)
+
+fit_sir_poisson_Bayes <- sampling(model,
+data = data_sir_Bayes_P,iter = niter,chains = 1)
+SIR.out2 = extract(fit_sir_poisson_Bayes)
+
+psi.R0 = function(M){
+  return(M)
+}
+
+DD.Bayes.R0 = profile_fn(psi.fn=psi.R0,M1=SIR.out1$R0,M2=SIR.out2$R0,psi.grid=psi.grid,method="c")
+
+```
+
+Now compute the analytical profile likelihood
+
+```{r}
+# Program for analytical MLE and profile MLE for SIR model
+
+sir_1 <- function(beta, gamma, S0, I0, R0, times) {
+  require(deSolve) # for the "ode" function
+  
+  # the differential equations:
+  sir_equations <- function(time, variables, parameters) {
+    with(as.list(c(variables, parameters)), {
+      dS <- -(beta) * I * S
+      dI <-  (beta) * I * S - gamma * I
+      dR <-  gamma * I
+      return(list(c(dS, dI, dR)))
+    })
+  }
+  # the parameters values:
+  parameters_values <- c(beta  = beta, gamma = gamma)
+  
+  # the initial values of variables:
+  initial_values <- c(S = S0, I = I0, R = R0)
+  
+  # solving
+  out <- ode(initial_values, times, sir_equations, parameters_values)
+  
+  # returning the output:
+  as.data.frame(out)
+}
+
+mLL_pois <- function(beta1, gamma1, day, cases) {
+  beta <- exp(beta1) # to make sure that the parameters are positive
+  gamma <- exp(gamma1)
+  #  sigma <- exp(sigma)
+  I0 <- cases[1] # initial number of infectious
+  observations <- cases[-1] # the fit is done on the other data points
+  predictions <- sir_1(beta = beta, gamma = gamma,
+                       S0 = N - I0, I0 = I0, R0 = 0, times = day)
+  predictions <- predictions$I[-1] # removing the first point too
+  if (any(predictions < 0)) return(NA) # safety
+  # returning minus log-likelihood:
+  #  -sum(dnorm(x = observations, mean = predictions, sd = sigma, log = TRUE))
+  return(-sum(dpois(x = observations, lambda = predictions, log = TRUE)))
+}
+
+flu <- read.table("https://bit.ly/2vDqAYN", header = TRUE)
+
+starting_param_val <- list(beta1 = 0.004, gamma1 = 0.5)
+estimates_pois <- bbmle::mle2(minuslogl = mLL_pois,
+                     start = lapply(starting_param_val,log),
+                     data = c(flu, N = 763))
+
+beta.hat = estimates_pois@coef[1]
+gamma.hat = estimates_pois@coef[2]
+R0 =(exp(beta.hat)*763)/exp(gamma.hat)
+
+```
+
+We rewrite the function so that R0 is a marginal 
+parameter to get the analytical profile likelihood.
+
+```{r}
+mLL_pois_R0 <- function(BR01, gamma1, day, cases) {
+  beta1 <- log(exp(BR01)*exp(gamma1)/N)
+  beta <- exp(beta1) # to make sure that the parameters are positive
+  gamma <- exp(gamma1)
+  I0 <- cases[1] # initial number of infectious
+  observations <- cases[-1] # the fit is done on the other data points
+  predictions <- sir_1(beta = beta, gamma = gamma,
+                       S0 = N - I0, I0 = I0, R0 = 0, times = day)
+  predictions <- predictions$I[-1] # removing the first point too
+  if (any(predictions < 0)) return(NA) # safety
+  # returning minus log-likelihood:
+  #  -sum(dnorm(x = observations, mean = predictions, sd = sigma, log = TRUE))
+  return(-sum(dpois(x = observations, lambda = predictions, log = TRUE)))
+}
+
+
+starting_param_val <- list(BR01 = 4, gamma1 = 0.5)
+estimates_pois <- bbmle::mle2(minuslogl = mLL_pois_R0,
+                     start = lapply(starting_param_val,log),
+                     data = c(flu, N = 763))
+
+
+R0.hat = exp(estimates_pois@coef[1])
+# This should be nearly the same as the one obtained before.
+c(R0,R0.hat)
+```
+
+```{r}
+R0.grid = log(psi.grid)
+N.grid = length(R0.grid)
+out = matrix(0,N.grid,3)
+
+
+for (i in 1:N.grid){
+  tryCatch({
+  estimates_pois.fix <- bbmle::mle2(minuslogl = mLL_pois_R0,
+                                    start = lapply(starting_param_val,log),fixed=list(BR01=R0.grid[i]),
+                                    data = c(flu, N = 763))},error = function(e) e)
+ 
+  out[i,] = c(R0.grid[i],estimates_pois.fix@coef, estimates_pois.fix@min)
+}
+
+Profile.ana = cbind(exp(out[,1]),-out[,3])
+
+# Need to standardize this.
+Profile.ana[,2] = Profile.ana[,2] - max(Profile.ana[,2])
+
+```
+
+Get the data for the profile likelihood.
+
+```{r}
+
+loglike.data = data.frame(psi.grid=psi.grid,
+DD.PL.q = DD.profile.q$Profile.out[,2],
+DD.PL.B = DD.Bayes.R0$Profile.out[,2],
+DD.PL.ana = Profile.ana[,2])
+
+write.table(loglike.data,here("SIR model/Figure2 data.csv"))
+
+```
+Plot the profile likelihood estimates (Algorithms 1 and 2 and analytical) 
+
+```{r}
+loglike.data = read.table(here("SIR model/Figure2 data.csv"))
+fig2 = ggplot() +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.q),col="black",linetype="dashed") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.B),col="black",linetype="twodash") +
+  geom_line(data=loglike.data,aes(x=psi.grid,y=DD.PL.ana),col="black") +
+labs(x="Basic Reproduction Rate", y="Profile LL") +
+  ylim(-3,1) + 
+  theme(text = element_text(size = 6))+
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave(here("SIR model/Figure2.pdf"),fig2,device="pdf")
+```
